@@ -10,4 +10,4 @@ COPY go.mod go.sum mtrgraphs.go ./
 RUN go mod download
 RUN go build -o mtrgraphs .
 
-CMD ["./mtrgraphs"]
+ENTRYPOINT ["/app/mtrgraphs"]

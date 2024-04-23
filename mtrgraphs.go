@@ -17,13 +17,21 @@ import (
 
 const mtrCycles = "10"
 
-var mtrTargets = []string{"1.1.1.1"}
+var mtrTargets []string
 
 var saveToInfluxDB func(string)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// read all targets from args
+	if len(os.Args) > 1 {
+		mtrTargets = os.Args[1:]
+	} else {
+		log.Fatalf("No targets provided\n")
+	}
+
 	saveToInfluxDB = initInfluxDB(ctx)
 	for {
 		select {
