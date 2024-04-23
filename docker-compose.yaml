@@ -1,0 +1,48 @@
+services:
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=secret
+    volumes:
+      - grafana:/var/lib/grafana
+    networks:
+      - monitoring
+  influxdb:
+    container_name: influxdb
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=mtrgraphs
+      - DOCKER_INFLUXDB_INIT_PASSWORD=mtrgraphs
+      - DOCKER_INFLUXDB_INIT_ORG=mtrgraphs
+      - DOCKER_INFLUXDB_INIT_BUCKET=mtrgraphs
+      - DOCKER_INFLUXDB_INIT_RETENTION=4w
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=my-super-secret-auth-token
+      - INFLUXDB_HTTP_LOG_ENABLED=true
+    image: influxdb:2
+    networks:
+      - monitoring
+  goservice:
+    image: adamgordon/mtrgraphs
+    depends_on:
+      - influxdb
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=my-super-secret-auth-token
+      - INFLUXDB_ORG=mtrgraphs
+      - INFLUXDB_BUCKET=mtrgraphs
+    networks:
+      - monitoring
+networks:
+  monitoring:
+volumes:
+  grafana:
+  influxdb-data:
+  influxdb-config:
