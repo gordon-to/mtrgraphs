@@ -39,7 +39,7 @@ func main() {
 	rttCh := make(chan *pingTarget, 10)
 	ttlCh := make(chan *pingTarget, 10)
 	// Start 20 workers to ping hosts
-	for range 20 {
+	for range 60 {
 		go func() {
 			for {
 				select {
