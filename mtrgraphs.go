@@ -37,8 +37,8 @@ func main() {
 	}()
 	saveToInfluxDB = initInfluxDB(ctx)
 
-	rttCh := make(chan *pingTarget, 10)
-	ttlCh := make(chan *pingTarget, 10)
+	rttCh := make(chan *pingTarget, 50)
+	ttlCh := make(chan *pingTarget, 50)
 	// Start 60 workers to ping hosts
 	for range 60 {
 		go func() {
