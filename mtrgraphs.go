@@ -1,22 +1,19 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"os/exec"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/influxdata/influxdb-client-go/v2"
+	"mtr-graphs/ping"
 )
-
-const mtrCycles = "10"
 
 var saveToInfluxDB func(string)
 
@@ -24,6 +21,9 @@ type pingTarget struct {
 	ip    string
 	reply chan bool
 }
+
+var availableHosts = make(map[string]struct{})
+var hostsLock sync.Mutex
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -33,23 +33,42 @@ func main() {
 	}()
 	saveToInfluxDB = initInfluxDB(ctx)
 
-	// create 10 goroutines to send pings
-	pingCh := make(chan pingTarget, 10)
+	// create 10 goroutines to send rtt pings
+	rttCh := make(chan *pingTarget, 10)
 	for range 10 {
 		go func() {
-			for tgt := range pingCh {
-				tgt.reply <- sendPing(tgt.ip)
+			for tgt := range rttCh {
+				rtt, reply := ping.Rtt(ctx, tgt.ip)
+				if !reply {
+					tgt.reply <- false
+					break
+				}
+				influxDbRecord := fmt.Sprintf("ping,dst=%s,rtt=%f\n", tgt.ip, rtt)
+				saveToInfluxDB(influxDbRecord)
+				tgt.reply <- true
 			}
 		}()
 	}
-
-	// create 10 goroutines to run mtr
-	mtrChan := make(chan pingTarget, 10)
+	// create 10 goroutines to send ttl pings
+	ttlCh := make(chan *pingTarget, 10)
 	for range 10 {
 		go func() {
-			for tgt := range mtrChan {
-				runMtr(ctx, tgt.ip)
-				tgt.reply <- true
+			for tgt := range ttlCh {
+				ttl := 1
+				for {
+					dst, reply := ping.Ttl(ctx, tgt.ip, ttl)
+					if !reply {
+						tgt.reply <- false
+						break
+					}
+					monitorHost(ctx, &pingTarget{ip: dst, reply: make(chan bool)}, rttCh)
+					if dst == tgt.ip {
+						tgt.reply <- true
+						break
+					}
+					<-time.After(1 * time.Second)
+					ttl++
+				}
 			}
 		}()
 	}
@@ -63,35 +82,56 @@ func main() {
 			return
 		}
 		for ip = ip.Mask(ipNet.Mask); ipNet.Contains(ip); incrementIP(ip) {
-			go pingAndMtr(ctx, ip.String(), pingCh, mtrChan)
+			go traceIp(ctx, ip.String(), ttlCh)
 		}
 	}
 
 	<-ctx.Done()
-	close(pingCh)
-	close(mtrChan)
+	close(ttlCh)
+	close(rttCh)
 }
 
-func pingAndMtr(ctx context.Context, ip string, pingCh, mtrChan chan pingTarget) {
-	tgt := pingTarget{ip: ip, reply: make(chan bool)}
+func traceIp(ctx context.Context, ip string, ttlCh chan<- *pingTarget) {
+	tgt := &pingTarget{ip: ip, reply: make(chan bool)}
 	defer close(tgt.reply)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			// send ping to check if host is alive wait for 10 minutes if not
-			pingCh <- tgt
-			available := <-tgt.reply
-			if !available {
-				<-time.After(10 * time.Minute)
-				continue
-			}
-			mtrChan <- tgt
+			ttlCh <- tgt
 			<-tgt.reply
-			<-time.After(1 * time.Minute)
+			<-time.After(10 * time.Minute)
 		}
 	}
+}
+
+func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarget) {
+	hostsLock.Lock()
+	if _, ok := availableHosts[target.ip]; ok {
+		hostsLock.Unlock()
+		return
+	}
+	availableHosts[target.ip] = struct{}{}
+	hostsLock.Unlock()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				rttCh <- target
+				reply := <-target.reply
+				if !reply {
+					hostsLock.Lock()
+					delete(availableHosts, target.ip)
+					hostsLock.Unlock()
+					return
+				}
+				<-time.After(10 * time.Second)
+			}
+		}
+	}()
 }
 
 func initInfluxDB(ctx context.Context) func(string) {
@@ -116,71 +156,10 @@ func initInfluxDB(ctx context.Context) func(string) {
 		}
 	}()
 	return func(line string) {
+		fmt.Println(line)
 		writeAPI.WriteRecord(line)
 	}
 
-}
-
-// runMtr runs the mtr command with the given target and parses the output as JSON.
-func runMtr(ctx context.Context, target string) {
-	cmdCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
-	defer cancel()
-	// create byte buffer to store the output
-	cmd := exec.CommandContext(cmdCtx, "mtr", "-c", mtrCycles, "-r", "-j", target)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("Error running mtr command: %v\n", err)
-	}
-	res := mtrReport{}
-	err = json.Unmarshal(output, &res)
-	if err != nil {
-		log.Printf("Error parsing mtr output: %v\n", err)
-	}
-	for _, hub := range res.Report.Hubs {
-		influxDbRecord := fmt.Sprintf("mtr,src=%s,dst=%s,host=%s Loss=%f,Snt=%d,Last=%f,Avg=%f,Best=%f,Wrst=%f,StDev=%f\n",
-			res.Report.Mtr.Src, res.Report.Mtr.Dst, hub.Host, hub.Loss, hub.Snt, hub.Last, hub.Avg, hub.Best, hub.Wrst, hub.StDev)
-		saveToInfluxDB(influxDbRecord)
-		fmt.Println(influxDbRecord)
-	}
-}
-
-type mtrReport struct {
-	Report struct {
-		Mtr struct {
-			Src        string `json:"src"`
-			Dst        string `json:"dst"`
-			Tos        int    `json:"tos"`
-			Tests      int    `json:"tests"`
-			Psize      string `json:"psize"`
-			Bitpattern string `json:"bitpattern"`
-		} `json:"mtr"`
-		Hubs []struct {
-			Count int     `json:"count"`
-			Host  string  `json:"host"`
-			Loss  float64 `json:"Loss%"`
-			Snt   int     `json:"Snt"`
-			Last  float64 `json:"Last"`
-			Avg   float64 `json:"Avg"`
-			Best  float64 `json:"Best"`
-			Wrst  float64 `json:"Wrst"`
-			StDev float64 `json:"StDev"`
-		} `json:"hubs"`
-	} `json:"report"`
-}
-
-func sendPing(ip string) bool {
-	cmd := exec.Command("ping", "-c", "1", ip)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("Host: %s, No reply or error: %s\n", ip, err)
-		return true // Continue tracing until max hops
-	}
-	fmt.Printf("Host: %s, Reply: %s\n", ip, output)
-	return string(output) != "" && !contains(output, "1 packets received")
-}
-
-func contains(b []byte, s string) bool {
-	return bytes.Contains(b, []byte(s))
 }
 
 func incrementIP(ip net.IP) {
