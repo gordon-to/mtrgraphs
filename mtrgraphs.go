@@ -66,7 +66,7 @@ func main() {
 						tgt.reply <- true
 						break
 					}
-					<-time.After(1 * time.Second)
+					<-time.After(10 * time.Millisecond)
 					ttl++
 				}
 			}

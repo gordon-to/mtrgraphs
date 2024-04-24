@@ -23,15 +23,15 @@ func Ttl(ctx context.Context, ip string, ttl int) (string, bool) {
 	defer cancel()
 	cmd := exec.CommandContext(cmdCtx, "ping", "-c", "1", "-t", strconv.Itoa(ttl), ip)
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("Host: %s, No reply or error: %s\n", ip, err)
-		return "", true // Continue tracing until max hops
-	}
 	// check if the output contains the TTL exceeded message
 	if ttlRegex.Match(output) {
 		return ttlRegex.FindStringSubmatch(string(output))[1], true
 	}
-	fmt.Printf("Host: %s, Reply: %s\n", ip, output)
+	if err != nil {
+		fmt.Printf("TTL Host: %s, No reply or error: %s\n", ip, err)
+		return "", true // Continue tracing until max hops
+	}
+	fmt.Printf("TTL: Host: %s, Reply: %s\n", ip, output)
 	return ip, string(output) != "" && !contains(output, "1 packets received")
 }
 
@@ -41,7 +41,7 @@ func Rtt(ctx context.Context, ip string) (float64, bool) {
 	cmd := exec.CommandContext(cmdCtx, "ping", "-c", "1", ip)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("Host: %s, No reply or error: %s\n", ip, err)
+		fmt.Printf("RTT: Host: %s, No reply or error: %s\n", ip, err)
 		return 0, false
 	}
 	if rttRegex.Match(output) {
