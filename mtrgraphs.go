@@ -20,6 +20,11 @@ const mtrCycles = "10"
 
 var saveToInfluxDB func(string)
 
+type pingTarget struct {
+	ip    string
+	reply chan bool
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer func() {
@@ -28,51 +33,62 @@ func main() {
 	}()
 	saveToInfluxDB = initInfluxDB(ctx)
 
+	// create 10 goroutines to send pings
+	pingCh := make(chan pingTarget, 10)
+	for range 10 {
+		go func() {
+			for tgt := range pingCh {
+				tgt.reply <- sendPing(tgt.ip)
+			}
+		}()
+	}
+
+	// create 10 goroutines to run mtr
+	mtrChan := make(chan pingTarget, 10)
+	for range 10 {
+		go func() {
+			for tgt := range mtrChan {
+				runMtr(ctx, tgt.ip)
+				tgt.reply <- true
+			}
+		}()
+	}
+
 	// read all targets from args
 	cidr := os.Args[1]
 	// Scan the network
-	ip, ipnet, err := net.ParseCIDR(cidr)
+	ip, ipNet, err := net.ParseCIDR(cidr)
 	if err != nil {
 		fmt.Println("Error parsing CIDR:", err)
 		return
 	}
-	for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
+	for ip = ip.Mask(ipNet.Mask); ipNet.Contains(ip); incrementIP(ip) {
 		go func(ip string) {
-			var cancel context.CancelFunc
+			tgt := pingTarget{ip: ip, reply: make(chan bool)}
+			defer close(tgt.reply)
 			for {
 				select {
 				case <-ctx.Done():
-					if cancel != nil {
-						cancel()
-					}
 					return
 				default:
-					// send ping to check if the host is reachable
-					if sendPing(ip) {
-						var childCtx context.Context
-						childCtx, cancel = context.WithTimeout(ctx, 10*time.Minute)
-						go func() {
-							for {
-								select {
-								case <-childCtx.Done():
-									return
-								default:
-									runMtr(ctx, ip)
-								}
-								<-time.After(1 * time.Minute)
-							}
-						}()
-						<-childCtx.Done()
-					} else {
-						// wait for 10 minutes before retrying the same IP
+					// send ping to check if host is alive wait for 10 minutes if not
+					pingCh <- tgt
+					available := <-tgt.reply
+					if !available {
 						<-time.After(10 * time.Minute)
+						continue
 					}
-
+					mtrChan <- tgt
+					<-tgt.reply
+					<-time.After(1 * time.Minute)
 				}
 			}
+
 		}(ip.String())
 	}
 	<-ctx.Done()
+	close(pingCh)
+	close(mtrChan)
 }
 
 func initInfluxDB(ctx context.Context) func(string) {
@@ -104,8 +120,10 @@ func initInfluxDB(ctx context.Context) func(string) {
 
 // runMtr runs the mtr command with the given target and parses the output as JSON.
 func runMtr(ctx context.Context, target string) {
+	cmdCtx, cancel := context.WithTimeout(ctx, 1*time.Minute)
+	defer cancel()
 	// create byte buffer to store the output
-	cmd := exec.CommandContext(ctx, "mtr", "-c", mtrCycles, "-r", "-j", target)
+	cmd := exec.CommandContext(cmdCtx, "mtr", "-c", mtrCycles, "-r", "-j", target)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("Error running mtr command: %v\n", err)
