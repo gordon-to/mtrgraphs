@@ -80,8 +80,12 @@ func main() {
 			default:
 				<-time.After(10 * time.Second)
 				hostsLock.Lock()
-				fmt.Println("Available hosts:", availableHosts)
+				numberOfHosts := len(availableHosts)
+				fmt.Printf("Available hosts: %d, %v \n", numberOfHosts, availableHosts)
 				hostsLock.Unlock()
+				influxPoint := influxdb2.NewPointWithMeasurement("available_hosts")
+				influxPoint.AddField("count", numberOfHosts)
+				saveToInfluxDB(influxPoint)
 			}
 		}
 	}()
@@ -96,7 +100,7 @@ func main() {
 		}
 		for ip = ip.Mask(ipNet.Mask); ipNet.Contains(ip); incrementIP(ip) {
 			fmt.Printf("Scanning IP: %s\n", ip.String())
-			go traceIp(ctx, ip.String(), ttlCh)
+			go traceIp(ctx, ip.String(), ttlCh, rttCh)
 		}
 	}
 
@@ -105,16 +109,20 @@ func main() {
 	close(rttCh)
 }
 
-func traceIp(ctx context.Context, ip string, ttlCh chan<- *pingTarget) {
-	tgt := &pingTarget{ip: ip, reply: make(chan bool)}
+func traceIp(ctx context.Context, ip string, ttlCh, rttCh chan<- *pingTarget) {
+	tgt := &pingTarget{ip: ip, reply: make(chan bool), ttl: 2}
 	defer close(tgt.reply)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			ttlCh <- tgt
-			<-tgt.reply
+			rttCh <- tgt
+			found := <-tgt.reply
+			if found {
+				ttlCh <- tgt
+				<-tgt.reply
+			}
 			<-time.After(10 * time.Minute)
 		}
 	}
@@ -123,9 +131,10 @@ func traceIp(ctx context.Context, ip string, ttlCh chan<- *pingTarget) {
 func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarget) {
 	hostsLock.Lock()
 	defer hostsLock.Unlock()
-	if _, ok := availableHosts[target.ip]; !ok {
+	if _, ok := availableHosts[target.ip]; ok {
 		return
 	}
+	availableHosts[target.ip] = struct{}{}
 	go func() {
 		for {
 			select {
