@@ -14,6 +14,7 @@ const maxHops = 128
 
 var ttlRegex = regexp.MustCompile(`^From ([0-9.]+)`)
 var rttRegex = regexp.MustCompile(`time=([0-9.]+)`)
+var unreachableRegex = regexp.MustCompile(`Destination Host Unreachable`)
 
 func Ttl(ctx context.Context, ip string, ttl int) (string, bool) {
 	if ttl > maxHops {
@@ -23,15 +24,21 @@ func Ttl(ctx context.Context, ip string, ttl int) (string, bool) {
 	defer cancel()
 	cmd := exec.CommandContext(cmdCtx, "ping", "-c", "1", "-t", strconv.Itoa(ttl), ip)
 	output, err := cmd.CombinedOutput()
+	if output != nil {
+		fmt.Printf("TTL: Host: %s, Reply: %s\n", ip, output)
+	}
 	// check if the output contains the TTL exceeded message
 	if ttlRegex.Match(output) {
 		return ttlRegex.FindStringSubmatch(string(output))[1], true
 	}
+	// check if the output contains the Destination Host Unreachable message
+	if unreachableRegex.Match(output) {
+		return "", false
+	}
 	if err != nil {
-		fmt.Printf("TTL Host: %s, No reply or error: %s\n", ip, err)
+		fmt.Printf("TTL: Host: %s, No reply or error: %s\n", ip, err)
 		return "", true // Continue tracing until max hops
 	}
-	fmt.Printf("TTL: Host: %s, Reply: %s\n", ip, output)
 	return ip, string(output) != "" && !contains(output, "1 packets received")
 }
 
