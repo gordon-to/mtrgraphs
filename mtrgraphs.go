@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -38,7 +39,7 @@ func main() {
 
 	rttCh := make(chan *pingTarget, 10)
 	ttlCh := make(chan *pingTarget, 10)
-	// Start 20 workers to ping hosts
+	// Start 60 workers to ping hosts
 	for range 60 {
 		go func() {
 			for {
@@ -123,7 +124,7 @@ func traceIp(ctx context.Context, ip string, ttlCh, rttCh chan<- *pingTarget) {
 				ttlCh <- tgt
 				<-tgt.reply
 			}
-			<-time.After(10 * time.Minute)
+			<-time.After(10*time.Minute + (time.Duration(rand.Intn(100)) * time.Millisecond))
 		}
 	}
 }
