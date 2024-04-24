@@ -8,6 +8,9 @@ services:
       - "--entryPoints.web.http.redirections.entryPoint.to=websecure"
       - "--entryPoints.web.http.redirections.entryPoint.scheme=https"
       - "--entryPoints.websecure.address=:443"
+      - "--certificatesresolvers.free.acme.tlschallenge=true"
+      - "--certificatesresolvers.free.acme.email=postmaster@example.com"
+      - "--certificatesresolvers.free.acme.storage=/acme/acme.json"
     ports:
       - "80:80"
       - "443:443"
@@ -15,6 +18,7 @@ services:
       - monitoring
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - traefik-acme:/acme
   grafana:
     image: grafana/grafana:latest
     env_file:
@@ -25,10 +29,10 @@ services:
       - monitoring
     labels:
         - "traefik.enable=false"
-        - "traefik.http.routers.grafana.rule=Host(`pinger.ischool.utoronto.ca`)"
+        - "traefik.http.routers.grafana.rule=Host(`example.com`)"
         - "traefik.http.routers.grafana.entrypoints=websecure"
         - "traefik.http.routers.grafana.tls=true"
-        - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+        - "traefik.http.routers.grafana.tls.certresolver=free"
         - "traefik.http.services.grafana.loadbalancer.server.port=3000"
   influxdb:
     container_name: influxdb
@@ -69,3 +73,4 @@ volumes:
   grafana:
   influxdb-data:
   influxdb-config:
+  traefik-acme:
