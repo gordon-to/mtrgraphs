@@ -54,41 +54,44 @@ func main() {
 		}()
 	}
 
-	// read all targets from args
-	cidr := os.Args[1]
-	// Scan the network
-	ip, ipNet, err := net.ParseCIDR(cidr)
-	if err != nil {
-		fmt.Println("Error parsing CIDR:", err)
-		return
+	cidrRanges := os.Args[1:]
+	for _, cidr := range cidrRanges {
+		// Scan the network
+		ip, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			fmt.Println("Error parsing CIDR:", err)
+			return
+		}
+		for ip = ip.Mask(ipNet.Mask); ipNet.Contains(ip); incrementIP(ip) {
+			go pingAndMtr(ctx, ip.String(), pingCh, mtrChan)
+		}
 	}
-	for ip = ip.Mask(ipNet.Mask); ipNet.Contains(ip); incrementIP(ip) {
-		go func(ip string) {
-			tgt := pingTarget{ip: ip, reply: make(chan bool)}
-			defer close(tgt.reply)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-					// send ping to check if host is alive wait for 10 minutes if not
-					pingCh <- tgt
-					available := <-tgt.reply
-					if !available {
-						<-time.After(10 * time.Minute)
-						continue
-					}
-					mtrChan <- tgt
-					<-tgt.reply
-					<-time.After(1 * time.Minute)
-				}
-			}
 
-		}(ip.String())
-	}
 	<-ctx.Done()
 	close(pingCh)
 	close(mtrChan)
+}
+
+func pingAndMtr(ctx context.Context, ip string, pingCh, mtrChan chan pingTarget) {
+	tgt := pingTarget{ip: ip, reply: make(chan bool)}
+	defer close(tgt.reply)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			// send ping to check if host is alive wait for 10 minutes if not
+			pingCh <- tgt
+			available := <-tgt.reply
+			if !available {
+				<-time.After(10 * time.Minute)
+				continue
+			}
+			mtrChan <- tgt
+			<-tgt.reply
+			<-time.After(1 * time.Minute)
+		}
+	}
 }
 
 func initInfluxDB(ctx context.Context) func(string) {
