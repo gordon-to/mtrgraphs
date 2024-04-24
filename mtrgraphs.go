@@ -12,14 +12,17 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb-client-go/v2"
+	"github.com/influxdata/influxdb-client-go/v2/api/write"
 	"mtr-graphs/ping"
 )
 
-var saveToInfluxDB func(string)
+var saveToInfluxDB func(point *write.Point)
 
 type pingTarget struct {
-	ip    string
-	reply chan bool
+	ip      string
+	reply   chan bool
+	ttl     int
+	rttOnce sync.Once
 }
 
 var availableHosts = make(map[string]struct{})
@@ -33,45 +36,55 @@ func main() {
 	}()
 	saveToInfluxDB = initInfluxDB(ctx)
 
-	// create 10 goroutines to send rtt pings
 	rttCh := make(chan *pingTarget, 10)
-	for range 10 {
-		go func() {
-			for tgt := range rttCh {
-				rtt, reply := ping.Rtt(ctx, tgt.ip)
-				if !reply {
-					tgt.reply <- false
-					break
-				}
-				influxDbRecord := fmt.Sprintf("ping,dst=%s,rtt=%f\n", tgt.ip, rtt)
-				saveToInfluxDB(influxDbRecord)
-				tgt.reply <- true
-			}
-		}()
-	}
-	// create 10 goroutines to send ttl pings
 	ttlCh := make(chan *pingTarget, 10)
-	for range 10 {
+	// Start 20 workers to ping hosts
+	for range 20 {
 		go func() {
-			for tgt := range ttlCh {
-				ttl := 1
-				for {
-					dst, reply := ping.Ttl(ctx, tgt.ip, ttl)
-					if !reply {
-						tgt.reply <- false
-						break
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case tgt := <-rttCh:
+					rtt, reply := ping.Rtt(ctx, tgt.ip)
+					if reply {
+						influxPoint := influxdb2.NewPointWithMeasurement("ping")
+						influxPoint.AddTag("host", tgt.ip)
+						influxPoint.AddField("rtt", rtt)
+						saveToInfluxDB(influxPoint)
 					}
-					monitorHost(ctx, &pingTarget{ip: dst, reply: make(chan bool)}, rttCh)
-					if dst == tgt.ip {
-						tgt.reply <- true
-						break
+					tgt.reply <- reply
+				case tgt := <-ttlCh:
+					for {
+						dst, reply := ping.Ttl(ctx, tgt.ip, tgt.ttl)
+						tgt.ttl++
+						if !reply {
+							continue
+						}
+						monitorHost(ctx, &pingTarget{ip: dst, reply: make(chan bool)}, rttCh)
+						if dst == tgt.ip {
+							break
+						}
 					}
-					<-time.After(10 * time.Millisecond)
-					ttl++
+					tgt.reply <- true
 				}
 			}
 		}()
 	}
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				<-time.After(10 * time.Second)
+				hostsLock.Lock()
+				fmt.Println("Available hosts:", availableHosts)
+				hostsLock.Unlock()
+			}
+		}
+	}()
 
 	cidrRanges := os.Args[1:]
 	for _, cidr := range cidrRanges {
@@ -82,6 +95,7 @@ func main() {
 			return
 		}
 		for ip = ip.Mask(ipNet.Mask); ipNet.Contains(ip); incrementIP(ip) {
+			fmt.Printf("Scanning IP: %s\n", ip.String())
 			go traceIp(ctx, ip.String(), ttlCh)
 		}
 	}
@@ -108,12 +122,10 @@ func traceIp(ctx context.Context, ip string, ttlCh chan<- *pingTarget) {
 
 func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarget) {
 	hostsLock.Lock()
-	if _, ok := availableHosts[target.ip]; ok {
-		hostsLock.Unlock()
+	defer hostsLock.Unlock()
+	if _, ok := availableHosts[target.ip]; !ok {
 		return
 	}
-	availableHosts[target.ip] = struct{}{}
-	hostsLock.Unlock()
 	go func() {
 		for {
 			select {
@@ -124,6 +136,7 @@ func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarg
 				reply := <-target.reply
 				if !reply {
 					hostsLock.Lock()
+					fmt.Println("Host", target.ip, "is unreachable")
 					delete(availableHosts, target.ip)
 					hostsLock.Unlock()
 					return
@@ -134,7 +147,7 @@ func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarg
 	}()
 }
 
-func initInfluxDB(ctx context.Context) func(string) {
+func initInfluxDB(ctx context.Context) func(*write.Point) {
 	// initialize influxdb connection
 	dbURL := os.Getenv("INFLUXDB_URL")
 	dbToken := os.Getenv("INFLUXDB_TOKEN")
@@ -155,9 +168,9 @@ func initInfluxDB(ctx context.Context) func(string) {
 			log.Fatalf("Error writing to InfluxDB, %v\n", err)
 		}
 	}()
-	return func(line string) {
-		fmt.Println(line)
-		writeAPI.WriteRecord(line)
+	return func(p *write.Point) {
+		writeAPI.WritePoint(p)
+		fmt.Printf("Wrote point: %v\n", p)
 	}
 
 }
