@@ -1,14 +1,35 @@
 services:
+  reverse-proxy:
+    image: traefik:v2.4
+    command:
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entryPoints.web.http.redirections.entryPoint.scheme=https"
+      - "--entryPoints.websecure.address=:443"
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - monitoring
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
   grafana:
     image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=secret
+    env_file:
+      - grafana.env
     volumes:
       - grafana:/var/lib/grafana
     networks:
       - monitoring
+    labels:
+        - "traefik.enable=false"
+        - "traefik.http.routers.grafana.rule=Host(`pinger.ischool.utoronto.ca`)"
+        - "traefik.http.routers.grafana.entrypoints=websecure"
+        - "traefik.http.routers.grafana.tls=true"
+        - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+        - "traefik.http.services.grafana.loadbalancer.server.port=3000"
   influxdb:
     container_name: influxdb
     volumes:
@@ -41,8 +62,7 @@ services:
     networks:
       - monitoring
     command:
-      - "1.1.1.1"
-      - "8.8.8.8"
+      - "172.24.0.30/24"
 networks:
   monitoring:
 volumes:

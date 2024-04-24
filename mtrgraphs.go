@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,35 +18,61 @@ import (
 
 const mtrCycles = "10"
 
-var mtrTargets []string
-
 var saveToInfluxDB func(string)
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	defer func() {
+		recover()
+		stop()
+	}()
+	saveToInfluxDB = initInfluxDB(ctx)
 
 	// read all targets from args
-	if len(os.Args) > 1 {
-		mtrTargets = os.Args[1:]
-	} else {
-		log.Fatalf("No targets provided\n")
+	cidr := os.Args[1]
+	// Scan the network
+	ip, ipnet, err := net.ParseCIDR(cidr)
+	if err != nil {
+		fmt.Println("Error parsing CIDR:", err)
+		return
 	}
+	for ip := ip.Mask(ipnet.Mask); ipnet.Contains(ip); incrementIP(ip) {
+		go func(ip string) {
+			var cancel context.CancelFunc
+			for {
+				select {
+				case <-ctx.Done():
+					if cancel != nil {
+						cancel()
+					}
+					return
+				default:
+					// send ping to check if the host is reachable
+					if sendPing(ip) {
+						var childCtx context.Context
+						childCtx, cancel = context.WithTimeout(ctx, 10*time.Minute)
+						go func() {
+							for {
+								select {
+								case <-childCtx.Done():
+									return
+								default:
+									runMtr(ctx, ip)
+								}
+								<-time.After(1 * time.Minute)
+							}
+						}()
+						<-childCtx.Done()
+					} else {
+						// wait for 10 minutes before retrying the same IP
+						<-time.After(10 * time.Minute)
+					}
 
-	saveToInfluxDB = initInfluxDB(ctx)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			for _, target := range mtrTargets {
-				// run mtr command
-				runMtr(ctx, target)
+				}
 			}
-			// wait 10 seconds before running mtr again
-			<-time.After(10 * time.Second)
-		}
+		}(ip.String())
 	}
+	<-ctx.Done()
 }
 
 func initInfluxDB(ctx context.Context) func(string) {
@@ -78,18 +105,15 @@ func initInfluxDB(ctx context.Context) func(string) {
 // runMtr runs the mtr command with the given target and parses the output as JSON.
 func runMtr(ctx context.Context, target string) {
 	// create byte buffer to store the output
-	var output bytes.Buffer
 	cmd := exec.CommandContext(ctx, "mtr", "-c", mtrCycles, "-r", "-j", target)
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = &output
-	err := cmd.Run()
+	output, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Fatalf("Error running mtr command: %v\n", err)
+		log.Printf("Error running mtr command: %v\n", err)
 	}
 	res := mtrReport{}
-	err = json.Unmarshal(output.Bytes(), &res)
+	err = json.Unmarshal(output, &res)
 	if err != nil {
-		log.Fatalf("Error parsing mtr output: %v\n", err)
+		log.Printf("Error parsing mtr output: %v\n", err)
 	}
 	for _, hub := range res.Report.Hubs {
 		influxDbRecord := fmt.Sprintf("mtr,src=%s,dst=%s,host=%s Loss=%f,Snt=%d,Last=%f,Avg=%f,Best=%f,Wrst=%f,StDev=%f\n",
@@ -121,4 +145,28 @@ type mtrReport struct {
 			StDev float64 `json:"StDev"`
 		} `json:"hubs"`
 	} `json:"report"`
+}
+
+func sendPing(ip string) bool {
+	cmd := exec.Command("ping", "-c", "1", ip)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Printf("Host: %s, No reply or error: %s\n", ip, err)
+		return true // Continue tracing until max hops
+	}
+	fmt.Printf("Host: %s, Reply: %s\n", ip, output)
+	return string(output) != "" && !contains(output, "1 packets received")
+}
+
+func contains(b []byte, s string) bool {
+	return bytes.Contains(b, []byte(s))
+}
+
+func incrementIP(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
 }
