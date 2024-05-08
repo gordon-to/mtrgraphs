@@ -153,9 +153,9 @@ func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarg
 				if !reply {
 					target.fails++
 
-					influxPoint := influxdb2.NewPointWithMeasurement("dropped_ping")
+					influxPoint := influxdb2.NewPointWithMeasurement("drop")
 					influxPoint.AddTag("host", target.ip)
-					influxPoint.AddTag("fail_count", strconv.Itoa(target.fails))
+					influxPoint.AddField("fails", strconv.Itoa(target.fails))
 					saveToInfluxDB(influxPoint)
 
 					if target.fails >= maxFails {
