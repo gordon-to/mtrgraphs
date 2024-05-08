@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"os/signal"
@@ -19,15 +18,19 @@ import (
 
 var saveToInfluxDB func(point *write.Point)
 
+const baseDelay = 5 * time.Second
+const maxFails = 10
+
 type pingTarget struct {
 	ip      string
 	reply   chan bool
 	ttl     int
 	rttOnce sync.Once
+	delay   time.Duration
+	fails   int
 }
 
-var availableHosts = make(map[string]struct{})
-var hostsLock sync.Mutex
+var availableHosts sync.Map
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -80,10 +83,12 @@ func main() {
 				return
 			default:
 				<-time.After(10 * time.Second)
-				hostsLock.Lock()
-				numberOfHosts := len(availableHosts)
-				fmt.Printf("Available hosts: %d, %v \n", numberOfHosts, availableHosts)
-				hostsLock.Unlock()
+				numberOfHosts := 0
+				availableHosts.Range(func(key, value any) bool {
+					numberOfHosts++
+					return true
+				})
+				fmt.Printf("Available hosts: %d \n", numberOfHosts)
 				influxPoint := influxdb2.NewPointWithMeasurement("available_hosts")
 				influxPoint.AddField("count", numberOfHosts)
 				saveToInfluxDB(influxPoint)
@@ -92,6 +97,7 @@ func main() {
 	}()
 
 	cidrRanges := os.Args[1:]
+	var targets []*pingTarget
 	for _, cidr := range cidrRanges {
 		// Scan the network
 		ip, ipNet, err := net.ParseCIDR(cidr)
@@ -100,8 +106,22 @@ func main() {
 			return
 		}
 		for ip = ip.Mask(ipNet.Mask); ipNet.Contains(ip); incrementIP(ip) {
-			fmt.Printf("Scanning IP: %s\n", ip.String())
-			go traceIp(ctx, ip.String(), ttlCh, rttCh)
+			targets = append(targets, &pingTarget{
+				ip:    ip.String(),
+				reply: make(chan bool),
+				ttl:   2,
+			})
+		}
+	}
+	tkr := time.NewTicker(10 * time.Minute)
+	for range tkr.C {
+		for _, tgt := range targets {
+			go func() {
+				rttCh <- tgt
+				if found := <-tgt.reply; found {
+					ttlCh <- tgt
+				}
+			}()
 		}
 	}
 
@@ -110,32 +130,10 @@ func main() {
 	close(rttCh)
 }
 
-func traceIp(ctx context.Context, ip string, ttlCh, rttCh chan<- *pingTarget) {
-	tgt := &pingTarget{ip: ip, reply: make(chan bool), ttl: 2}
-	defer close(tgt.reply)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			rttCh <- tgt
-			found := <-tgt.reply
-			if found {
-				ttlCh <- tgt
-				<-tgt.reply
-			}
-			<-time.After(10*time.Minute + (time.Duration(rand.Intn(100)) * time.Millisecond))
-		}
-	}
-}
-
 func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarget) {
-	hostsLock.Lock()
-	defer hostsLock.Unlock()
-	if _, ok := availableHosts[target.ip]; ok {
+	if _, loaded := availableHosts.LoadOrStore(target.ip, struct{}{}); loaded {
 		return
 	}
-	availableHosts[target.ip] = struct{}{}
 	go func() {
 		for {
 			select {
@@ -145,13 +143,14 @@ func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarg
 				rttCh <- target
 				reply := <-target.reply
 				if !reply {
-					hostsLock.Lock()
-					fmt.Println("Host", target.ip, "is unreachable")
-					delete(availableHosts, target.ip)
-					hostsLock.Unlock()
-					return
+					target.fails++
+					if target.fails >= maxFails {
+						availableHosts.Delete(target.ip)
+						fmt.Println("Host", target.ip, "is unreachable")
+						return
+					}
 				}
-				<-time.After(10 * time.Second)
+				<-time.After(baseDelay)
 			}
 		}
 	}()
