@@ -83,14 +83,14 @@ func main() {
 				return
 			default:
 				<-time.After(10 * time.Second)
-				numberOfHosts := 0
+				currentHosts := make([]string, 0)
 				availableHosts.Range(func(key, value any) bool {
-					numberOfHosts++
+					currentHosts = append(currentHosts, key.(string))
 					return true
 				})
-				fmt.Printf("Available hosts: %d \n", numberOfHosts)
+				fmt.Printf("Available hosts: %d\n %v\n", len(currentHosts), currentHosts)
 				influxPoint := influxdb2.NewPointWithMeasurement("available_hosts")
-				influxPoint.AddField("count", numberOfHosts)
+				influxPoint.AddField("count", len(currentHosts))
 				saveToInfluxDB(influxPoint)
 			}
 		}
@@ -113,10 +113,12 @@ func main() {
 			})
 		}
 	}
-	tkr := time.NewTicker(10 * time.Minute)
-	for range tkr.C {
+	f := func() {
 		for _, tgt := range targets {
 			go func() {
+				if _, loaded := availableHosts.Load(tgt.ip); loaded {
+					return
+				}
 				rttCh <- tgt
 				if found := <-tgt.reply; found {
 					ttlCh <- tgt
@@ -124,8 +126,14 @@ func main() {
 			}()
 		}
 	}
+	f()
+	tkr := time.NewTicker(10 * time.Minute)
+	for range tkr.C {
+		f()
+	}
 
 	<-ctx.Done()
+	tkr.Stop()
 	close(ttlCh)
 	close(rttCh)
 }
