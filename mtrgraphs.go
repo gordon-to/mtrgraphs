@@ -7,13 +7,15 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
+	"mtr-graphs/ping"
+
 	"github.com/influxdata/influxdb-client-go/v2"
 	"github.com/influxdata/influxdb-client-go/v2/api/write"
-	"mtr-graphs/ping"
 )
 
 var saveToInfluxDB func(point *write.Point)
@@ -155,7 +157,7 @@ func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarg
 
 					influxPoint := influxdb2.NewPointWithMeasurement("drop")
 					influxPoint.AddTag("host", target.ip)
-					influxPoint.AddTag("fail", target.fails)
+					influxPoint.AddTag("fail", strconv.Itoa(target.fails))
 					saveToInfluxDB(influxPoint)
 
 					if target.fails >= maxFails {
