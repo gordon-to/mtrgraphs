@@ -24,12 +24,10 @@ const baseDelay = 5 * time.Second
 const maxFails = 10
 
 type pingTarget struct {
-	ip      string
-	reply   chan bool
-	ttl     int
-	rttOnce sync.Once
-	delay   time.Duration
-	fails   int
+	ip    string
+	reply chan bool
+	ttl   int
+	fails int
 }
 
 var availableHosts sync.Map
@@ -116,8 +114,8 @@ func main() {
 		}
 	}
 	f := func() {
-		for _, tgt := range targets {
-			go func() {
+		for _, t := range targets {
+			go func(tgt *pingTarget) {
 				if _, loaded := availableHosts.Load(tgt.ip); loaded {
 					return
 				}
@@ -125,7 +123,7 @@ func main() {
 				if found := <-tgt.reply; found {
 					ttlCh <- tgt
 				}
-			}()
+			}(t)
 		}
 	}
 	f()
@@ -155,9 +153,9 @@ func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarg
 				if !reply {
 					target.fails++
 
-					influxPoint := influxdb2.NewPointWithMeasurement("drop")
+					influxPoint := influxdb2.NewPointWithMeasurement("dropped_ping")
 					influxPoint.AddTag("host", target.ip)
-					influxPoint.AddTag("fail", strconv.Itoa(target.fails))
+					influxPoint.AddTag("fail_count", strconv.Itoa(target.fails))
 					saveToInfluxDB(influxPoint)
 
 					if target.fails >= maxFails {
