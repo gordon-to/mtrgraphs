@@ -41,59 +41,48 @@ func main() {
 
 	rttCh := make(chan *pingTarget, 50)
 	ttlCh := make(chan *pingTarget, 50)
-	// Start 60 workers to ping hosts
-	for range 60 {
-		go func() {
+	// start 10 workers for host discovery
+	for range 10 {
+		go doUntilDone(ctx, ttlCh, func(tgt *pingTarget, _ func()) {
 			for {
-				select {
-				case <-ctx.Done():
-					return
-				case tgt := <-rttCh:
-					rtt, reply := ping.Rtt(ctx, tgt.ip)
-					if reply {
-						influxPoint := influxdb2.NewPointWithMeasurement("ping")
-						influxPoint.AddTag("host", tgt.ip)
-						influxPoint.AddField("rtt", rtt)
-						saveToInfluxDB(influxPoint)
-					}
-					tgt.reply <- reply
-				case tgt := <-ttlCh:
-					for {
-						dst, reply := ping.Ttl(ctx, tgt.ip, tgt.ttl)
-						tgt.ttl++
-						if !reply {
-							continue
-						}
-						monitorHost(ctx, &pingTarget{ip: dst, reply: make(chan bool)}, rttCh)
-						if dst == tgt.ip {
-							break
-						}
-					}
-					tgt.reply <- true
+				dst, reply := ping.Ttl(ctx, tgt.ip, tgt.ttl)
+				tgt.ttl++
+				if !reply {
+					continue
+				}
+				monitorHost(ctx, &pingTarget{ip: dst, reply: make(chan bool)}, rttCh)
+				if dst == tgt.ip {
+					break
 				}
 			}
-		}()
+			tgt.reply <- true
+		})
 	}
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				<-time.After(10 * time.Second)
-				currentHosts := make([]string, 0)
-				availableHosts.Range(func(key, value any) bool {
-					currentHosts = append(currentHosts, key.(string))
-					return true
-				})
-				fmt.Printf("Available hosts: %d\n %v\n", len(currentHosts), currentHosts)
-				influxPoint := influxdb2.NewPointWithMeasurement("available_hosts")
-				influxPoint.AddField("count", len(currentHosts))
+	// Start 60 workers to ping hosts
+	for range 60 {
+		go doUntilDone(ctx, rttCh, func(tgt *pingTarget, _ func()) {
+			rtt, reply := ping.Rtt(ctx, tgt.ip)
+			if reply {
+				influxPoint := influxdb2.NewPointWithMeasurement("ping")
+				influxPoint.AddTag("host", tgt.ip)
+				influxPoint.AddField("rtt", rtt)
 				saveToInfluxDB(influxPoint)
 			}
-		}
-	}()
+			tgt.reply <- reply
+		})
+	}
+
+	go doUntilDone(ctx, time.After(10*time.Second), func(_ time.Time, _ func()) {
+		currentHosts := make([]string, 0)
+		availableHosts.Range(func(key, value any) bool {
+			currentHosts = append(currentHosts, key.(string))
+			return true
+		})
+		fmt.Printf("Available hosts: %d\n %v\n", len(currentHosts), currentHosts)
+		influxPoint := influxdb2.NewPointWithMeasurement("available_hosts")
+		influxPoint.AddField("count", len(currentHosts))
+		saveToInfluxDB(influxPoint)
+	})
 
 	cidrRanges := os.Args[1:]
 	var targets []*pingTarget
@@ -141,34 +130,35 @@ func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarg
 	if _, loaded := availableHosts.LoadOrStore(target.ip, struct{}{}); loaded {
 		return
 	}
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-				rttCh <- target
-				reply := <-target.reply
-				if !reply {
-					target.fails++
-
-					influxPoint := influxdb2.NewPointWithMeasurement("drop")
+	go doUntilDone(ctx, time.After(baseDelay), func(_ time.Time, cancel func()) {
+		rttCh <- target
+		reply := <-target.reply
+		if !reply {
+			target.fails++
+influxPoint := influxdb2.NewPointWithMeasurement("drop")
 					influxPoint.AddTag("host", target.ip)
 					influxPoint.AddField("fails", target.fails)
-					saveToInfluxDB(influxPoint)
-
-					if target.fails >= maxFails {
-						availableHosts.Delete(target.ip)
-						fmt.Println("Host", target.ip, "is unreachable")
-						return
-					}
-				} else {
+					saveToInfluxDB(influxPoint)			if target.fails >= maxFails {
+				availableHosts.Delete(target.ip)
+				fmt.Println("Host", target.ip, "is unreachable")
+				cancel()
+			}} else {
 					target.fails = 0
-				}
-				<-time.After(baseDelay)
-			}
 		}
-	}()
+	})
+}
+
+func doUntilDone[T interface{}](ctx context.Context, c <-chan T, do func(T, func())) {
+	cCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	for {
+		select {
+		case <-cCtx.Done():
+			return
+		case t := <-c:
+			do(t, cancel)
+		}
+	}
 }
 
 func initInfluxDB(ctx context.Context) func(*write.Point) {
