@@ -135,15 +135,17 @@ func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarg
 		reply := <-target.reply
 		if !reply {
 			target.fails++
-influxPoint := influxdb2.NewPointWithMeasurement("drop")
-					influxPoint.AddTag("host", target.ip)
-					influxPoint.AddField("fails", target.fails)
-					saveToInfluxDB(influxPoint)			if target.fails >= maxFails {
+			influxPoint := influxdb2.NewPointWithMeasurement("drop")
+			influxPoint.AddTag("host", target.ip)
+			influxPoint.AddField("fails", target.fails)
+			saveToInfluxDB(influxPoint)
+			if target.fails >= maxFails {
 				availableHosts.Delete(target.ip)
 				fmt.Println("Host", target.ip, "is unreachable")
 				cancel()
-			}} else {
-					target.fails = 0
+			}
+		} else {
+			target.fails = 0
 		}
 	})
 }
