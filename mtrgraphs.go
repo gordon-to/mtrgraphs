@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -155,7 +154,7 @@ func monitorHost(ctx context.Context, target *pingTarget, rttCh chan<- *pingTarg
 
 					influxPoint := influxdb2.NewPointWithMeasurement("drop")
 					influxPoint.AddTag("host", target.ip)
-					influxPoint.AddField("fails", strconv.Itoa(target.fails))
+					influxPoint.AddField("fails", target.fails)
 					saveToInfluxDB(influxPoint)
 
 					if target.fails >= maxFails {
